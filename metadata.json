@@ -1,0 +1,10 @@
+{
+  "name": "Remix Remix Remix: Sintetizador Audiovisual Modular",
+  "description": "Um sintetizador musical generativo interativo que transforma vídeos em sons e música em tempo real através de sensores coloridos e estimulação de movimento.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
