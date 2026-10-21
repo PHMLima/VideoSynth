@@ -1030,69 +1030,87 @@ export class AudioEngine {
   private static groove: number = 30; // 0% (rigid) to 100% (loose swing)
   private static inertia: number = 65; // 0% (instant) to 100% (deep sustain & smooth inertia)
   private static activeSensorCount: number = 4;
+  private static pendingReverbWet: number = 35;
+  private static pendingSensors: Array<{
+    id: number;
+    instrument: InstrumentType;
+    mode: PlaybackMode;
+    volume: number;
+    pitch: number;
+    timbre: number;
+    arpEnabled?: boolean;
+    arpSpeed?: number;
+    arpPattern?: 'up' | 'down' | 'random';
+    x?: number;
+    y?: number;
+  }> = [];
 
   public static initialize() {
     if (this.isInitialized) return;
 
-    this.limiterNode = new Tone.Limiter(-1.2);
+    try {
+      this.limiterNode = new Tone.Limiter(-1.2);
 
-    // Gentle glue compressor for cohesive studio soundscape
-    this.compressorNode = new Tone.Compressor({
-      threshold: -18,
-      ratio: 3,
-      attack: 0.03,
-      release: 0.25
-    });
+      // Gentle glue compressor for cohesive studio soundscape
+      this.compressorNode = new Tone.Compressor({
+        threshold: -18,
+        ratio: 3,
+        attack: 0.03,
+        release: 0.25
+      });
 
-    // Global Delay Node
-    this.delayNode = new Tone.FeedbackDelay({
-      delayTime: '8n.',
-      feedback: 0.28,
-      wet: 0.14
-    });
+      // Global Delay Node
+      this.delayNode = new Tone.FeedbackDelay({
+        delayTime: '8n.',
+        feedback: 0.28,
+        wet: 0.14
+      });
 
-    // Reverb Node
-    this.reverbNode = new Tone.Reverb({
-      decay: 3.0,
-      preDelay: 0.04,
-      wet: 0.35
-    });
+      // Reverb Node
+      this.reverbNode = new Tone.Reverb({
+        decay: 3.0,
+        preDelay: 0.04,
+        wet: this.pendingReverbWet / 100
+      });
 
-    // Analog-style Warm Lowpass & Subtle Stereo Chorus for Melodic/Drone Bus
-    this.masterWarmFilter = new Tone.Filter({
-      type: 'lowpass',
-      frequency: 4800,
-      rolloff: -12,
-      Q: 0.7
-    });
+      // Analog-style Warm Lowpass & Subtle Stereo Chorus for Melodic/Drone Bus
+      this.masterWarmFilter = new Tone.Filter({
+        type: 'lowpass',
+        frequency: 4800,
+        rolloff: -12,
+        Q: 0.7
+      });
 
-    this.chorusNode = new Tone.Chorus({
-      frequency: 0.85,
-      delayTime: 3.5,
-      depth: 0.22,
-      wet: 0.2
-    }).start();
+      this.chorusNode = new Tone.Chorus({
+        frequency: 0.85,
+        delayTime: 3.5,
+        depth: 0.22,
+        wet: 0.2
+      }).start();
 
-    this.percussionBus = new Tone.Gain(1.0);
-    this.harmonicBus = new Tone.Gain(1.0);
+      this.percussionBus = new Tone.Gain(1.0);
+      this.harmonicBus = new Tone.Gain(1.0);
 
-    // Routing:
-    // Percussion -> Delay -> Reverb -> Compressor -> Limiter -> Destination
-    // Harmonic/Drones -> Sidechain Gain -> Warm Filter -> Chorus -> Delay -> Reverb -> Compressor -> Limiter
-    this.percussionBus.connect(this.delayNode);
-    this.harmonicBus.connect(this.masterWarmFilter);
-    this.masterWarmFilter.connect(this.chorusNode);
-    this.chorusNode.connect(this.delayNode);
+      // Routing:
+      // Percussion -> Delay -> Reverb -> Compressor -> Limiter -> Destination
+      // Harmonic/Drones -> Sidechain Gain -> Warm Filter -> Chorus -> Delay -> Reverb -> Compressor -> Limiter
+      this.percussionBus.connect(this.delayNode);
+      this.harmonicBus.connect(this.masterWarmFilter);
+      this.masterWarmFilter.connect(this.chorusNode);
+      this.chorusNode.connect(this.delayNode);
 
-    this.delayNode.connect(this.reverbNode);
-    this.reverbNode.connect(this.compressorNode);
-    this.compressorNode.connect(this.limiterNode);
-    this.limiterNode.toDestination();
+      this.delayNode.connect(this.reverbNode);
+      this.reverbNode.connect(this.compressorNode);
+      this.compressorNode.connect(this.limiterNode);
+      this.limiterNode.toDestination();
 
-    Tone.Transport.bpm.value = this.bpm;
+      Tone.Transport.bpm.value = this.bpm;
 
-    this.setupRecordingDestination();
-    this.isInitialized = true;
+      this.setupRecordingDestination();
+      this.isInitialized = true;
+    } catch (e) {
+      console.warn("AudioEngine initialization deferred until user interaction:", e);
+    }
   }
 
   private static setupRecordingDestination() {
@@ -1129,15 +1147,28 @@ export class AudioEngine {
   }
 
   public static async startAudioContext(): Promise<void> {
+    try {
+      await Tone.start();
+    } catch (e) {
+      console.warn("Tone.start() deferred:", e);
+    }
     this.initialize();
-    await Tone.start();
-    Tone.Transport.start();
+    if (this.pendingSensors.length > 0) {
+      this.syncSensors(this.pendingSensors);
+    }
+    try {
+      if (Tone.Transport.state !== 'started') {
+        Tone.Transport.start();
+      }
+    } catch (e) {
+      console.warn("Transport start warning:", e);
+    }
     this.setupRecordingDestination();
   }
 
   // --- Sidechain Ducking & Polyphonic Auto-Gain ---
   public static triggerSidechainDuck() {
-    if (!this.harmonicBus) return;
+    if (!this.harmonicBus || !this.isInitialized) return;
     try {
       const now = Tone.now();
       this.harmonicBus.gain.cancelScheduledValues(now);
@@ -1327,7 +1358,8 @@ export class AudioEngine {
   }
 
   public static modulateGlobalReverb(wetLevelPct: number) {
-    if (!this.reverbNode) return;
+    this.pendingReverbWet = wetLevelPct;
+    if (!this.reverbNode || !this.isInitialized) return;
     try {
       this.reverbNode.wet.rampTo(wetLevelPct / 100, 0.1);
     } catch (e) {}
@@ -1352,29 +1384,36 @@ export class AudioEngine {
     x?: number;
     y?: number;
   }>) {
-    this.initialize();
+    this.pendingSensors = sensors;
     this.activeSensorCount = Math.max(1, sensors.length);
 
-    const activeIds = new Set(sensors.map(s => s.id));
+    // Defer Tone.js synth/node instantiation until user gesture initializes AudioEngine
+    if (!this.isInitialized) return;
 
-    for (const [id, voice] of this.voicesStore.entries()) {
-      if (!activeIds.has(id)) {
-        voice.dispose();
-        this.voicesStore.delete(id);
-        this.activeVoiceNotes.delete(id);
-      }
-    }
+    try {
+      const activeIds = new Set(sensors.map(s => s.id));
 
-    for (const s of sensors) {
-      let voice = this.voicesStore.get(s.id);
-      if (!voice) {
-        voice = new VoiceController(s.id, s.instrument, s.mode);
-        this.voicesStore.set(s.id, voice);
+      for (const [id, voice] of this.voicesStore.entries()) {
+        if (!activeIds.has(id)) {
+          voice.dispose();
+          this.voicesStore.delete(id);
+          this.activeVoiceNotes.delete(id);
+        }
       }
-      voice.updateConfig(s.instrument, s.mode, s.volume, s.pitch, s.timbre, s.arpEnabled, s.arpSpeed, s.arpPattern);
-      if (s.x !== undefined && s.y !== undefined) {
-        voice.updateSpatial(s.x, s.y);
+
+      for (const s of sensors) {
+        let voice = this.voicesStore.get(s.id);
+        if (!voice) {
+          voice = new VoiceController(s.id, s.instrument, s.mode);
+          this.voicesStore.set(s.id, voice);
+        }
+        voice.updateConfig(s.instrument, s.mode, s.volume, s.pitch, s.timbre, s.arpEnabled, s.arpSpeed, s.arpPattern);
+        if (s.x !== undefined && s.y !== undefined) {
+          voice.updateSpatial(s.x, s.y);
+        }
       }
+    } catch (e) {
+      console.warn("syncSensors deferred:", e);
     }
   }
 
